@@ -1,0 +1,9 @@
+# Lokale data: bevat je Rompslomp API-token!
+data/
+
+# ICS-exports en templates bevatten persoonlijke transactiegegevens
+*.csv
+*.xlsx
+
+.DS_Store
+.claude/

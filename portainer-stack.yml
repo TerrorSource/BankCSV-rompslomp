@@ -1,0 +1,13 @@
+# Stack voor Portainer op je NAS.
+services:
+  ics-rompslomp:
+    image: ghcr.io/terrorsource/ics-rompslomp:latest
+    container_name: ics-rompslomp
+    ports:
+      - "8321:8000"
+    volumes:
+      - ics_rompslomp_data:/data
+    restart: unless-stopped
+
+volumes:
+  ics_rompslomp_data:

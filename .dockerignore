@@ -1,0 +1,10 @@
+data
+*.csv
+*.xlsx
+.git
+.github
+.claude
+.DS_Store
+README.md
+docker-compose.yml
+portainer-stack.yml

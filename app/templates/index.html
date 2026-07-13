@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ICS → Rompslomp</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; max-width: 900px;
+         margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
+  h1 { font-size: 1.5rem; }
+  fieldset { border: 1px solid #8884; border-radius: 8px; margin-bottom: 1.5rem; padding: 1rem; }
+  legend { font-weight: 600; padding: 0 .5rem; }
+  label { display: block; margin-top: .6rem; font-weight: 500; }
+  input[type=text], input[type=password], select {
+    width: 100%; max-width: 480px; padding: .45rem; margin-top: .2rem;
+    border: 1px solid #8886; border-radius: 6px; font-size: 1rem; box-sizing: border-box; }
+  button { margin-top: .8rem; padding: .5rem 1.1rem; font-size: 1rem; border-radius: 6px;
+           border: 1px solid #8886; cursor: pointer; }
+  button.primary { background: #2563eb; color: #fff; border-color: #2563eb; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  table { border-collapse: collapse; width: 100%; margin-top: 1rem; font-size: .92rem; }
+  th, td { border: 1px solid #8884; padding: .35rem .5rem; text-align: left; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  tr.dup { opacity: .55; }
+  tr.dup td { text-decoration: line-through; }
+  tr.dup td:first-child, tr.dup td:last-child { text-decoration: none; }
+  .msg { margin-top: .8rem; padding: .6rem .8rem; border-radius: 6px; display: none; }
+  .msg.err { background: #fee2e2; color: #991b1b; display: block; }
+  .msg.ok { background: #dcfce7; color: #166534; display: block; }
+  .muted { color: #888; font-size: .88rem; }
+  .badge { font-size: .78rem; padding: .1rem .45rem; border-radius: 999px; }
+  .badge.dup { background: #fef3c7; color: #92400e; }
+  .badge.new { background: #dcfce7; color: #166534; }
+  @media (prefers-color-scheme: dark) {
+    .msg.err { background: #7f1d1d; color: #fecaca; }
+    .msg.ok { background: #14532d; color: #bbf7d0; }
+    .badge.dup { background: #78350f; color: #fde68a; }
+    .badge.new { background: #14532d; color: #bbf7d0; }
+  }
+</style>
+</head>
+<body>
+<h1>ICS creditcard → Rompslomp</h1>
+
+<fieldset id="settings">
+  <legend>Instellingen</legend>
+  <div id="settingsStatus" class="muted"></div>
+  <label>Rompslomp API-token
+    <input type="password" id="token" placeholder="Laat leeg om opgeslagen token te blijven gebruiken">
+  </label>
+  <button id="btnConnect">Verbinden &amp; bedrijven ophalen</button>
+  <label>Bedrijf
+    <select id="company" disabled><option>— eerst verbinden —</option></select>
+  </label>
+  <label>Rekening (creditcard)
+    <select id="account" disabled><option>— eerst bedrijf kiezen —</option></select>
+  </label>
+  <button id="btnSave" class="primary">Instellingen opslaan</button>
+  <div id="settingsMsg" class="msg"></div>
+</fieldset>
+
+<fieldset>
+  <legend>CSV importeren</legend>
+  <p class="muted">Upload de transactie-export (.csv) van icscards.nl. Regels die al in
+  Rompslomp staan (zelfde datum + bedrag) worden automatisch overgeslagen.</p>
+  <input type="file" id="file" accept=".csv,text/csv">
+  <button id="btnPreview" class="primary">Controleren</button>
+  <div id="previewMsg" class="msg"></div>
+  <div id="previewWrap" style="display:none">
+    <p id="previewSummary"></p>
+    <table id="previewTable">
+      <thead><tr><th><input type="checkbox" id="checkAll" checked></th>
+        <th>Datum</th><th>Beschrijving</th><th style="text-align:right">Bedrag</th><th>Status</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <button id="btnImport" class="primary">Geselecteerde regels importeren</button>
+    <div id="importMsg" class="msg"></div>
+  </div>
+</fieldset>
+
+<script>
+const $ = id => document.getElementById(id);
+let previewRows = [];
+
+function show(el, text, cls) { el.textContent = text; el.className = 'msg ' + cls; }
+function hide(el) { el.className = 'msg'; el.textContent = ''; }
+
+async function api(path, opts) {
+  const resp = await fetch(path, opts);
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) throw new Error(data.error || ('HTTP ' + resp.status));
+  return data;
+}
+
+async function loadConfig() {
+  const cfg = await api('/api/config');
+  if (cfg.has_token) {
+    let status = 'Opgeslagen token aanwezig.';
+    if (cfg.company_name) status += ' Bedrijf: ' + cfg.company_name + '.';
+    if (cfg.account_name) status += ' Rekening: ' + cfg.account_name + '.';
+    $('settingsStatus').textContent = status;
+    if (cfg.company_id) {
+      $('company').innerHTML = '<option value="' + cfg.company_id + '">' + cfg.company_name + '</option>';
+      $('company').disabled = false;
+    }
+    if (cfg.account_id) {
+      $('account').innerHTML = '<option value="' + cfg.account_id + '">' + cfg.account_name + '</option>';
+      $('account').disabled = false;
+    }
+  } else {
+    $('settingsStatus').textContent = 'Nog geen token opgeslagen — vul hieronder je Rompslomp API-token in.';
+  }
+}
+
+$('btnConnect').onclick = async () => {
+  hide($('settingsMsg'));
+  try {
+    const data = await api('/api/companies', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({token: $('token').value})});
+    const sel = $('company');
+    sel.innerHTML = data.companies.map(c => {
+      let label = c.name, disabled = '';
+      if (!c.api_accessible) { label += ' (geen API-toegang — gratis abonnement)'; disabled = 'disabled'; }
+      else if (c.missing_scopes.length) { label += ` (token mist rechten: ${c.missing_scopes.join(', ')})`; disabled = 'disabled'; }
+      return `<option value="${c.id}" ${disabled}>${label}</option>`;
+    }).join('');
+    const usable = data.companies.find(c => c.api_accessible && !c.missing_scopes.length);
+    if (!usable) {
+      sel.disabled = true;
+      show($('settingsMsg'), 'Geen enkel bedrijf op dit token heeft API-toegang. ' +
+        'API-toegang vereist een betaald Rompslomp-abonnement en een token met de rechten read:accounts en manage:payments.', 'err');
+      return;
+    }
+    sel.value = usable.id;
+    sel.disabled = false;
+    await loadAccounts();
+  } catch (e) { show($('settingsMsg'), e.message, 'err'); }
+};
+
+async function loadAccounts() {
+  const data = await api('/api/accounts', {method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({token: $('token').value, company_id: $('company').value})});
+  const sel = $('account');
+  sel.innerHTML = data.accounts.map(a => `<option value="${a.id}">${a.name}</option>`).join('');
+  sel.disabled = false;
+}
+$('company').onchange = () => loadAccounts().catch(e => show($('settingsMsg'), e.message, 'err'));
+
+$('btnSave').onclick = async () => {
+  hide($('settingsMsg'));
+  try {
+    await api('/api/config', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        token: $('token').value,
+        company_id: parseInt($('company').value) || null,
+        company_name: $('company').selectedOptions[0]?.text || null,
+        account_id: parseInt($('account').value) || null,
+        account_name: $('account').selectedOptions[0]?.text || null,
+      })});
+    $('token').value = '';
+    show($('settingsMsg'), 'Instellingen opgeslagen.', 'ok');
+    loadConfig();
+  } catch (e) { show($('settingsMsg'), e.message, 'err'); }
+};
+
+$('btnPreview').onclick = async () => {
+  hide($('previewMsg')); hide($('importMsg'));
+  $('previewWrap').style.display = 'none';
+  const file = $('file').files[0];
+  if (!file) { show($('previewMsg'), 'Kies eerst een CSV-bestand.', 'err'); return; }
+  $('btnPreview').disabled = true;
+  try {
+    const fd = new FormData();
+    fd.append('file', file);
+    const data = await api('/api/preview', {method:'POST', body: fd});
+    previewRows = data.rows;
+    const tbody = $('previewTable').querySelector('tbody');
+    tbody.innerHTML = data.rows.map((r, i) => `
+      <tr class="${r.duplicate ? 'dup' : ''}">
+        <td><input type="checkbox" data-i="${i}" ${r.duplicate ? '' : 'checked'}></td>
+        <td>${r.date}</td><td>${r.description.replace(/</g,'&lt;')}</td>
+        <td class="num">${Number(r.amount).toFixed(2).replace('.', ',')}</td>
+        <td>${r.duplicate ? '<span class="badge dup">staat al in Rompslomp</span>'
+                          : '<span class="badge new">nieuw</span>'}</td>
+      </tr>`).join('');
+    $('previewSummary').textContent =
+      `${data.rows.length} regels in CSV — ${data.new_count} nieuw, ` +
+      `${data.rows.length - data.new_count} al aanwezig (vergeleken met ${data.existing_count} bestaande af/bij-schrijvingen).`;
+    $('previewWrap').style.display = 'block';
+  } catch (e) { show($('previewMsg'), e.message, 'err'); }
+  finally { $('btnPreview').disabled = false; }
+};
+
+$('checkAll').onchange = () => {
+  document.querySelectorAll('#previewTable tbody input[type=checkbox]')
+    .forEach(cb => cb.checked = $('checkAll').checked);
+};
+
+$('btnImport').onclick = async () => {
+  hide($('importMsg'));
+  const selected = [...document.querySelectorAll('#previewTable tbody input:checked')]
+    .map(cb => previewRows[parseInt(cb.dataset.i)]);
+  if (!selected.length) { show($('importMsg'), 'Geen regels geselecteerd.', 'err'); return; }
+  $('btnImport').disabled = true;
+  $('btnImport').textContent = 'Bezig met importeren…';
+  try {
+    const data = await api('/api/import', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify({rows: selected})});
+    let msg = `${data.imported} regel(s) geïmporteerd in Rompslomp.`;
+    if (data.failed) {
+      msg += ` ${data.failed} mislukt: ` +
+        data.results.filter(r => !r.ok).map(r => `${r.row.date} ${r.row.description}: ${r.error}`).join(' | ');
+    }
+    show($('importMsg'), msg, data.failed ? 'err' : 'ok');
+  } catch (e) { show($('importMsg'), e.message, 'err'); }
+  finally { $('btnImport').disabled = false; $('btnImport').textContent = 'Geselecteerde regels importeren'; }
+};
+
+loadConfig().catch(e => show($('settingsMsg'), e.message, 'err'));
+</script>
+</body>
+</html>
