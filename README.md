@@ -34,26 +34,40 @@ CSV uploaden, controleren, importeren.
 ### Met het kant-en-klare image (aanbevolen)
 
 Er wordt automatisch een multi-arch image (amd64/arm64) gepubliceerd naar de
-GitHub Container Registry. Gebruik [`portainer-stack.yml`](portainer-stack.yml)
-in Portainer (Stacks → Add stack → inhoud plakken → Deploy), of draai hem direct
-met Docker:
+GitHub Container Registry. Plak de inhoud van
+[`docker-compose.yml`](docker-compose.yml) in Portainer
+(Stacks → Add stack → Web editor → Deploy), of draai hem met Docker Compose:
 
-```bash
-docker run -d --name ics-rompslomp \
-  -p 8321:8000 \
-  -v ics_rompslomp_data:/data \
-  --restart unless-stopped \
-  ghcr.io/terrorsource/ics-rompslomp:latest
+```yaml
+version: "3"
+
+services:
+  ics-rompslomp:
+    container_name: ics-rompslomp
+    image: ghcr.io/terrorsource/ics-rompslomp:latest
+    init: true
+    restart: unless-stopped
+    network_mode: bridge
+    environment:
+      - TZ=Europe/Amsterdam
+    ports:
+      - 8321:8000
+    volumes:
+      - /share/CACHEDEV1_DATA/Docker/ics-rompslomp:/data
 ```
 
-Open daarna `http://localhost:8321` (of `http://<nas-ip>:8321`).
+Pas het volume-pad links van de `:` aan naar een map op je eigen systeem (het
+voorbeeld is een QNAP-pad); daar wordt de configuratie bewaard. Open daarna
+`http://<nas-ip>:8321`.
 
 ### Zelf bouwen vanaf de broncode
 
 ```bash
 git clone https://github.com/TerrorSource/ICS-rompslomp.git
 cd ICS-rompslomp
-docker compose up -d --build
+docker build -t ics-rompslomp .
+docker run -d --name ics-rompslomp -p 8321:8000 \
+  -v ./data:/data --restart unless-stopped ics-rompslomp
 ```
 
 ## Gebruik

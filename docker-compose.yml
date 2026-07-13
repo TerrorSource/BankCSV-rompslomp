@@ -1,9 +1,15 @@
+version: "3"
+
 services:
   ics-rompslomp:
-    build: .
     container_name: ics-rompslomp
-    ports:
-      - "8321:8000"
-    volumes:
-      - ./data:/data
+    image: ghcr.io/terrorsource/ics-rompslomp:latest
+    init: true
     restart: unless-stopped
+    network_mode: bridge
+    environment:
+      - TZ=Europe/Amsterdam
+    ports:
+      - 8321:8000
+    volumes:
+      - /share/CACHEDEV1_DATA/Docker/ics-rompslomp:/data
