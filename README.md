@@ -53,9 +53,9 @@ GitHub Container Registry. Plak de inhoud van
 version: "3"
 
 services:
-  ics-rompslomp:
-    container_name: ics-rompslomp
-    image: ghcr.io/terrorsource/ics-rompslomp:latest
+  bankcsv-rompslomp:
+    container_name: bankcsv-rompslomp
+    image: ghcr.io/terrorsource/bankcsv-rompslomp:latest
     init: true
     restart: unless-stopped
     network_mode: bridge
@@ -64,7 +64,7 @@ services:
     ports:
       - 8321:8000
     volumes:
-      - /share/CACHEDEV1_DATA/Docker/ics-rompslomp:/data
+      - /share/CACHEDEV1_DATA/Docker/bankcsv-rompslomp:/data
 ```
 
 Pas het volume-pad links van de `:` aan naar een map op je eigen systeem (het
@@ -74,11 +74,11 @@ voorbeeld is een QNAP-pad); daar wordt de configuratie bewaard. Open daarna
 ### Zelf bouwen vanaf de broncode
 
 ```bash
-git clone https://github.com/TerrorSource/ICS-rompslomp.git
-cd ICS-rompslomp
-docker build -t ics-rompslomp .
-docker run -d --name ics-rompslomp -p 8321:8000 \
-  -v ./data:/data --restart unless-stopped ics-rompslomp
+git clone https://github.com/TerrorSource/BankCSV-rompslomp.git
+cd BankCSV-rompslomp
+docker build -t bankcsv-rompslomp .
+docker run -d --name bankcsv-rompslomp -p 8321:8000 \
+  -v ./data:/data --restart unless-stopped bankcsv-rompslomp
 ```
 
 ## Gebruik

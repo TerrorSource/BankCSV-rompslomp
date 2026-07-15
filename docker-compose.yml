@@ -1,9 +1,9 @@
 version: "3"
 
 services:
-  ics-rompslomp:
-    container_name: ics-rompslomp
-    image: ghcr.io/terrorsource/ics-rompslomp:latest
+  bankcsv-rompslomp:
+    container_name: bankcsv-rompslomp
+    image: ghcr.io/terrorsource/bankcsv-rompslomp:latest
     init: true
     restart: unless-stopped
     network_mode: bridge
@@ -12,4 +12,4 @@ services:
     ports:
       - 8321:8000
     volumes:
-      - /share/CACHEDEV1_DATA/Docker/ics-rompslomp:/data
+      - /share/CACHEDEV1_DATA/Docker/bankcsv-rompslomp:/data
