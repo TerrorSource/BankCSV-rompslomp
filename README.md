@@ -1,24 +1,35 @@
-# ICS creditcard → Rompslomp
+# Bank-CSV → Rompslomp
 
-Kleine self-hosted webapp die transactie-exports (.csv) van
-[icscards.nl](https://www.icscards.nl) (ICS creditcard) importeert als
+Kleine self-hosted webapp die bank- en creditcardexports (.csv) importeert als
 af/bij-schrijvingen in [Rompslomp](https://rompslomp.nl) via de
 [Rompslomp API](https://app.rompslomp.nl/developer/endpoints).
+
+Ondersteunde formaten (automatisch herkend aan de kopregel):
+
+- **ICS creditcard** ([icscards.nl](https://www.icscards.nl)) — puntkomma's,
+  `dd-mm-jjjj`, Nederlandse bedragen
+- **GoDutch** — komma's, ISO-datums, aparte Debit/Credit-kolommen
+  (bedrag wordt Credit − Debit: af = negatief, bij = positief)
 
 Handmatig overtikken of Excel-templates invullen is daarmee niet meer nodig:
 CSV uploaden, controleren, importeren.
 
 ## Functies
 
-- **Upload & preview**: upload de ICS-export en zie eerst wat er geïmporteerd
-  gaat worden voordat er iets in je administratie belandt.
+- **Meerdere administraties**: stel per administratie een Rompslomp-bedrijf en
+  rekening in (bijv. één bedrijf met een ICS-creditcard en een ander bedrijf
+  met een GoDutch-rekening, binnen hetzelfde Rompslomp-account).
+- **Upload & preview**: zie eerst wat er geïmporteerd gaat worden voordat er
+  iets in je administratie belandt.
 - **Duplicaatdetectie**: transacties die al in Rompslomp staan worden herkend
   (zelfde absolute bedrag op de gekozen rekening, datum binnen ±3 dagen van de
-  transactie- of boekingsdatum) en standaard overgeslagen. Handig als je eerder
-  al handmatig of via de bankkoppeling hebt geboekt.
-- **Veldmapping**: de ICS-"Omschrijving" wordt de beschrijving in Rompslomp, de
-  transactiedatum wordt de boekingsdatum, bedragen worden ongewijzigd overgenomen.
-- **Instellingen blijven bewaard**: API-token, bedrijf en rekening worden éénmalig
+  transactie- of boekingsdatum) en standaard overgeslagen. Elke bestaande
+  boeking dekt maximaal één CSV-regel af, zodat twee identieke transacties op
+  dezelfde dag correct worden geteld.
+- **Veldmapping**: de omschrijving (bij GoDutch inclusief tegenpartij) wordt de
+  beschrijving in Rompslomp, de transactiedatum wordt de boekingsdatum,
+  bedragen worden ongewijzigd overgenomen.
+- **Instellingen blijven bewaard**: API-token en administraties worden éénmalig
   ingesteld en opgeslagen in een Docker-volume.
 
 ## Vereisten
@@ -72,12 +83,13 @@ docker run -d --name ics-rompslomp -p 8321:8000 \
 
 ## Gebruik
 
-1. Vul je Rompslomp API-token in en klik **Verbinden & bedrijven ophalen**.
-2. Kies je bedrijf en de (creditcard)rekening waarop de transacties geboekt
-   moeten worden, en klik **Instellingen opslaan**.
-3. Log in op icscards.nl en download de transacties als CSV.
-4. Upload het bestand, klik **Controleren** en bekijk de preview: nieuwe regels
-   staan aangevinkt, duplicaten zijn gemarkeerd en uitgevinkt.
+1. Vul je Rompslomp API-token in en klik **Verbinden & administraties bewerken**.
+2. Maak per bank/creditcard een administratie aan: geef een naam en kies het
+   Rompslomp-bedrijf en de rekening waarop de transacties geboekt moeten
+   worden. Klik **Instellingen opslaan**.
+3. Download de transacties als CSV bij je bank (icscards.nl of GoDutch).
+4. Kies de administratie, upload het bestand en klik **Controleren**: nieuwe
+   regels staan aangevinkt, duplicaten zijn gemarkeerd en uitgevinkt.
 5. Klik **Geselecteerde regels importeren** — klaar.
 
 ## Beveiliging

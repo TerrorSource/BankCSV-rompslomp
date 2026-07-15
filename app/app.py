@@ -20,9 +20,23 @@ app = Flask(__name__)
 def load_config():
     try:
         with open(CONFIG_PATH) as f:
-            return json.load(f)
+            cfg = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
+    # migratie van het oude één-administratie formaat
+    if "profiles" not in cfg and cfg.get("company_id"):
+        cfg["profiles"] = [{
+            "id": 1,
+            "name": f"{cfg.get('company_name') or 'Administratie'} — "
+                    f"{(cfg.get('account_name') or 'rekening').split(' • ')[-1]}",
+            "company_id": cfg.pop("company_id"),
+            "company_name": cfg.pop("company_name", None),
+            "account_id": cfg.pop("account_id"),
+            "account_name": cfg.pop("account_name", None),
+        }]
+        cfg.pop("invert_amounts", None)
+        save_config(cfg)
+    return cfg
 
 
 def save_config(cfg):
@@ -30,6 +44,13 @@ def save_config(cfg):
     with open(CONFIG_PATH, "w") as f:
         json.dump(cfg, f, indent=2)
     os.chmod(CONFIG_PATH, 0o600)
+
+
+def get_profile(cfg, profile_id):
+    for p in cfg.get("profiles", []):
+        if str(p.get("id")) == str(profile_id):
+            return p
+    return None
 
 
 # ---------- Rompslomp API ----------
@@ -84,7 +105,7 @@ def fetch_all_payments(token, company_id):
         page += 1
 
 
-# ---------- ICS CSV parsing ----------
+# ---------- CSV parsing ----------
 
 def parse_dutch_amount(text):
     """'1.234,56' -> Decimal('1234.56')"""
@@ -92,21 +113,18 @@ def parse_dutch_amount(text):
     return Decimal(cleaned)
 
 
-def parse_ics_csv(file_bytes):
+def decode_csv(file_bytes):
     try:
-        text = file_bytes.decode("utf-8-sig")
+        return file_bytes.decode("utf-8-sig")
     except UnicodeDecodeError:
-        text = file_bytes.decode("latin-1")
+        return file_bytes.decode("latin-1")
 
-    reader = csv.DictReader(io.StringIO(text), delimiter=";")
-    if not reader.fieldnames or "Omschrijving" not in reader.fieldnames:
-        raise ValueError(
-            "Dit lijkt geen ICS-export: kolom 'Omschrijving' ontbreekt. "
-            f"Gevonden kolommen: {reader.fieldnames}"
-        )
+
+def parse_ics_csv(reader):
+    """ICS creditcard-export: puntkomma's, dd-mm-jjjj, NL-bedragen met D/C-teken."""
     date_col = "Transactiedatum" if "Transactiedatum" in reader.fieldnames else "Boekingsdatum"
     if date_col not in reader.fieldnames or "Bedrag" not in reader.fieldnames:
-        raise ValueError("Kolom 'Transactiedatum'/'Boekingsdatum' of 'Bedrag' ontbreekt in het CSV-bestand.")
+        raise ValueError("Kolom 'Transactiedatum'/'Boekingsdatum' of 'Bedrag' ontbreekt in het ICS-bestand.")
 
     rows = []
     for line_no, row in enumerate(reader, start=2):
@@ -138,25 +156,99 @@ def parse_ics_csv(file_bytes):
     return rows
 
 
+def parse_godutch_csv(reader):
+    """GoDutch-bankexport: komma's, ISO-datums, aparte Debit/Credit-kolommen.
+    Bedrag = Credit - Debit (af = negatief, bij = positief), zoals de
+    bestaande boekingen in Rompslomp."""
+    rows = []
+    for line_no, row in enumerate(reader, start=2):
+        raw_date = (row.get("Date") or "").strip()
+        if not raw_date:
+            continue
+        try:
+            date = datetime.strptime(raw_date, "%Y-%m-%d").date()
+        except ValueError:
+            raise ValueError(f"Regel {line_no}: ongeldige datum '{raw_date}' (verwacht jjjj-mm-dd).")
+        try:
+            debit = Decimal((row.get("Debit Amount") or "").strip() or "0")
+            credit = Decimal((row.get("Credit Amount") or "").strip() or "0")
+        except InvalidOperation:
+            raise ValueError(f"Regel {line_no}: ongeldig bedrag "
+                             f"'{row.get('Debit Amount')}'/'{row.get('Credit Amount')}'.")
+        amount = credit - debit
+        if amount == 0:
+            continue
+        description = " — ".join(
+            part for part in ((row.get("Counterparty") or "").strip(),
+                              (row.get("Description") or "").strip())
+            if part
+        )
+        rows.append({
+            "date": date.isoformat(),
+            "booking_date": None,
+            "description": description,
+            "amount": str(amount),
+        })
+    return rows
+
+
+def parse_bank_csv(file_bytes):
+    """Herkent het exportformaat aan de kopregel en parseert naar
+    uniforme regels: {date, booking_date, description, amount}."""
+    text = decode_csv(file_bytes)
+    header = text.splitlines()[0] if text.splitlines() else ""
+    if "Transactiedatum" in header or "Boekingsdatum" in header:
+        reader = csv.DictReader(io.StringIO(text), delimiter=";")
+        return "ICS creditcard", parse_ics_csv(reader)
+    if "Debit Amount" in header and "Credit Amount" in header:
+        reader = csv.DictReader(io.StringIO(text))
+        return "GoDutch", parse_godutch_csv(reader)
+    raise ValueError(
+        "Onbekend CSV-formaat: dit lijkt geen ICS- of GoDutch-export. "
+        f"Gevonden kopregel: {header[:120]}"
+    )
+
+
+# ---------- duplicaatdetectie ----------
+
 DUPLICATE_TOLERANCE_DAYS = 3
 
 
-def is_duplicate(row, amount, existing_by_amount):
-    """Duplicaat als hetzelfde absolute bedrag al bestaat met een datum binnen
-    de tolerantie van de transactie- of boekingsdatum. Handmatig ingevoerde of
-    door de bank geboekte regels zitten er soms een dag(je) naast, en het
-    teken verschilt per invoermethode."""
-    existing_dates = existing_by_amount.get(abs(amount), [])
-    if not existing_dates:
+def build_existing_pool(existing, account_id):
+    """Index op absoluut bedrag -> lijst datums, alleen voor de gekozen rekening."""
+    pool = {}
+    count = 0
+    for p in existing:
+        if p.get("account_id") != account_id:
+            continue
+        try:
+            amount = abs(Decimal(p.get("amount") or "0"))
+            date = datetime.strptime((p.get("paid_at") or "")[:10], "%Y-%m-%d").date()
+        except (InvalidOperation, ValueError):
+            continue
+        pool.setdefault(amount, []).append(date)
+        count += 1
+    return pool, count
+
+
+def match_and_consume(row, pool):
+    """Duplicaat als hetzelfde absolute bedrag bestaat met een datum binnen de
+    tolerantie. Elke bestaande boeking dekt maximaal één CSV-regel af, zodat
+    twee identieke transacties op dezelfde dag niet allebei tegen dezelfde
+    boeking wegvallen. Datums zitten er soms een dag(je) naast en het teken
+    verschilt per invoermethode, vandaar de marge en het absolute bedrag."""
+    amount = abs(Decimal(row["amount"]))
+    dates = pool.get(amount)
+    if not dates:
         return False
     row_dates = [datetime.strptime(row["date"], "%Y-%m-%d").date()]
     if row.get("booking_date"):
         row_dates.append(datetime.strptime(row["booking_date"], "%Y-%m-%d").date())
-    return any(
-        abs((existing - d).days) <= DUPLICATE_TOLERANCE_DAYS
-        for existing in existing_dates
-        for d in row_dates
-    )
+    best = min(dates, key=lambda d: min(abs((d - rd).days) for rd in row_dates))
+    if min(abs((best - rd).days) for rd in row_dates) <= DUPLICATE_TOLERANCE_DAYS:
+        dates.remove(best)
+        return True
+    return False
 
 
 # ---------- routes ----------
@@ -171,10 +263,7 @@ def get_config():
     cfg = load_config()
     return jsonify({
         "has_token": bool(cfg.get("token")),
-        "company_id": cfg.get("company_id"),
-        "company_name": cfg.get("company_name"),
-        "account_id": cfg.get("account_id"),
-        "account_name": cfg.get("account_name"),
+        "profiles": cfg.get("profiles", []),
     })
 
 
@@ -185,9 +274,20 @@ def set_config():
     token = (data.get("token") or "").strip()
     if token:
         cfg["token"] = token
-    for key in ("company_id", "company_name", "account_id", "account_name"):
-        if key in data:
-            cfg[key] = data[key]
+    if "profiles" in data:
+        profiles = []
+        for i, p in enumerate(data["profiles"], start=1):
+            if not p.get("company_id") or not p.get("account_id"):
+                return jsonify({"error": f"Administratie {i} is onvolledig: kies bedrijf en rekening."}), 400
+            profiles.append({
+                "id": i,
+                "name": (p.get("name") or "").strip() or f"Administratie {i}",
+                "company_id": int(p["company_id"]),
+                "company_name": p.get("company_name"),
+                "account_id": int(p["account_id"]),
+                "account_name": p.get("account_name"),
+            })
+        cfg["profiles"] = profiles
     save_config(cfg)
     return jsonify({"ok": True})
 
@@ -249,49 +349,39 @@ def accounts():
 
 @app.route("/api/preview", methods=["POST"])
 def preview():
-    """CSV parsen en tegen bestaande Rompslomp-betalingen houden (datum + bedrag)."""
+    """CSV parsen en tegen bestaande Rompslomp-betalingen houden."""
     if "file" not in request.files:
         return jsonify({"error": "Geen bestand geüpload."}), 400
     cfg = load_config()
-    if not cfg.get("token") or not cfg.get("company_id") or not cfg.get("account_id"):
-        return jsonify({"error": "Instellingen onvolledig: sla eerst token, bedrijf en rekening op."}), 400
+    if not cfg.get("token"):
+        return jsonify({"error": "Geen API-token ingesteld: sla eerst de instellingen op."}), 400
+    profile = get_profile(cfg, request.form.get("profile_id"))
+    if not profile:
+        return jsonify({"error": "Geen (geldige) administratie gekozen."}), 400
 
     try:
-        rows = parse_ics_csv(request.files["file"].read())
+        csv_format, rows = parse_bank_csv(request.files["file"].read())
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
     try:
-        existing = fetch_all_payments(cfg["token"], cfg["company_id"])
+        existing = fetch_all_payments(cfg["token"], profile["company_id"])
     except RompslompError as e:
         return jsonify({"error": str(e)}), 400
 
-    # Alleen de gekozen (creditcard)rekening meenemen; index op absoluut bedrag.
-    existing_by_amount = {}
-    for p in existing:
-        if p.get("account_id") != cfg["account_id"]:
-            continue
-        paid_at = (p.get("paid_at") or "")[:10]
-        try:
-            amount = abs(Decimal(p.get("amount") or "0"))
-            date = datetime.strptime(paid_at, "%Y-%m-%d").date()
-        except (InvalidOperation, ValueError):
-            continue
-        existing_by_amount.setdefault(amount, []).append(date)
-
+    pool, existing_count = build_existing_pool(existing, profile["account_id"])
     out = []
     for row in rows:
-        amount = Decimal(row["amount"])
         out.append({
             "date": row["date"],
-            "booking_date": row["booking_date"],
             "description": row["description"],
-            "amount": str(amount),
-            "duplicate": is_duplicate(row, amount, existing_by_amount),
+            "amount": row["amount"],
+            "duplicate": match_and_consume(row, pool),
         })
     return jsonify({
+        "format": csv_format,
         "rows": out,
-        "existing_count": sum(len(v) for v in existing_by_amount.values()),
+        "existing_count": existing_count,
         "new_count": sum(1 for r in out if not r["duplicate"]),
     })
 
@@ -303,8 +393,11 @@ def do_import():
     if not rows:
         return jsonify({"error": "Geen regels geselecteerd."}), 400
     cfg = load_config()
-    if not cfg.get("token") or not cfg.get("company_id") or not cfg.get("account_id"):
-        return jsonify({"error": "Instellingen onvolledig."}), 400
+    if not cfg.get("token"):
+        return jsonify({"error": "Geen API-token ingesteld."}), 400
+    profile = get_profile(cfg, data.get("profile_id"))
+    if not profile:
+        return jsonify({"error": "Geen (geldige) administratie gekozen."}), 400
 
     results = []
     for row in rows:
@@ -312,14 +405,14 @@ def do_import():
             "payment": {
                 "amount": str(row["amount"]),
                 "description": row["description"],
-                "account_id": cfg["account_id"],
+                "account_id": profile["account_id"],
                 "paid_at": row["date"],
             }
         }
         try:
             created = api_request(
                 "POST",
-                f"/api/v1/companies/{cfg['company_id']}/payments",
+                f"/api/v1/companies/{profile['company_id']}/payments",
                 cfg["token"],
                 json=payload,
             )
@@ -337,5 +430,5 @@ def do_import():
 if __name__ == "__main__":
     from waitress import serve
     port = int(os.environ.get("PORT", "8000"))
-    print(f"ICS → Rompslomp importer draait op poort {port}")
+    print(f"CSV → Rompslomp importer draait op poort {port}")
     serve(app, host="0.0.0.0", port=port)

@@ -3,10 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ICS → Rompslomp</title>
+<title>Bank-CSV → Rompslomp</title>
 <style>
   :root { color-scheme: light dark; }
-  body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; max-width: 900px;
+  body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; max-width: 960px;
          margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
   h1 { font-size: 1.5rem; }
   fieldset { border: 1px solid #8884; border-radius: 8px; margin-bottom: 1.5rem; padding: 1rem; }
@@ -18,6 +18,7 @@
   button { margin-top: .8rem; padding: .5rem 1.1rem; font-size: 1rem; border-radius: 6px;
            border: 1px solid #8886; cursor: pointer; }
   button.primary { background: #2563eb; color: #fff; border-color: #2563eb; }
+  button.small { padding: .25rem .7rem; font-size: .85rem; margin-top: 0; }
   button:disabled { opacity: .5; cursor: not-allowed; }
   table { border-collapse: collapse; width: 100%; margin-top: 1rem; font-size: .92rem; }
   th, td { border: 1px solid #8884; padding: .35rem .5rem; text-align: left; }
@@ -29,9 +30,12 @@
   .msg.err { background: #fee2e2; color: #991b1b; display: block; }
   .msg.ok { background: #dcfce7; color: #166534; display: block; }
   .muted { color: #888; font-size: .88rem; }
-  .badge { font-size: .78rem; padding: .1rem .45rem; border-radius: 999px; }
+  .badge { font-size: .78rem; padding: .1rem .45rem; border-radius: 999px; white-space: nowrap; }
   .badge.dup { background: #fef3c7; color: #92400e; }
   .badge.new { background: #dcfce7; color: #166534; }
+  .profile { border: 1px solid #8884; border-radius: 8px; padding: .8rem; margin-top: .8rem; }
+  .profile-head { display: flex; justify-content: space-between; align-items: center; gap: .5rem; }
+  .profile-head input { font-weight: 600; }
   @media (prefers-color-scheme: dark) {
     .msg.err { background: #7f1d1d; color: #fecaca; }
     .msg.ok { background: #14532d; color: #bbf7d0; }
@@ -41,31 +45,36 @@
 </style>
 </head>
 <body>
-<h1>ICS creditcard → Rompslomp</h1>
+<h1>Bank-CSV → Rompslomp</h1>
+<p class="muted">Importeert exports van ICS creditcard en GoDutch als af/bij-schrijvingen
+in Rompslomp. Het CSV-formaat wordt automatisch herkend.</p>
 
-<fieldset id="settings">
+<fieldset>
   <legend>Instellingen</legend>
   <div id="settingsStatus" class="muted"></div>
   <label>Rompslomp API-token
     <input type="password" id="token" placeholder="Laat leeg om opgeslagen token te blijven gebruiken">
   </label>
-  <button id="btnConnect">Verbinden &amp; bedrijven ophalen</button>
-  <label>Bedrijf
-    <select id="company" disabled><option>— eerst verbinden —</option></select>
-  </label>
-  <label>Rekening (creditcard)
-    <select id="account" disabled><option>— eerst bedrijf kiezen —</option></select>
-  </label>
-  <button id="btnSave" class="primary">Instellingen opslaan</button>
+  <button id="btnConnect">Verbinden &amp; administraties bewerken</button>
+  <div id="profileEditor" style="display:none">
+    <div id="profiles"></div>
+    <button id="btnAddProfile" class="small">+ Administratie toevoegen</button><br>
+    <button id="btnSave" class="primary">Instellingen opslaan</button>
+  </div>
   <div id="settingsMsg" class="msg"></div>
 </fieldset>
 
 <fieldset>
   <legend>CSV importeren</legend>
-  <p class="muted">Upload de transactie-export (.csv) van icscards.nl. Regels die al in
-  Rompslomp staan (zelfde datum + bedrag) worden automatisch overgeslagen.</p>
-  <input type="file" id="file" accept=".csv,text/csv">
+  <label>Administratie
+    <select id="importProfile"><option>— nog geen administraties ingesteld —</option></select>
+  </label>
+  <label>CSV-bestand (ICS of GoDutch)
+    <input type="file" id="file" accept=".csv,text/csv">
+  </label>
   <button id="btnPreview" class="primary">Controleren</button>
+  <p class="muted">Regels die al in Rompslomp staan (zelfde bedrag, datum binnen ±3 dagen,
+  per stuk geteld) worden automatisch overgeslagen.</p>
   <div id="previewMsg" class="msg"></div>
   <div id="previewWrap" style="display:none">
     <p id="previewSummary"></p>
@@ -82,9 +91,13 @@
 <script>
 const $ = id => document.getElementById(id);
 let previewRows = [];
+let companies = [];            // [{id, name, api_accessible, missing_scopes}]
+const accountsCache = {};      // company_id -> [{id, name}]
+let editorProfiles = [];       // werkkopie van administraties in de editor
 
 function show(el, text, cls) { el.textContent = text; el.className = 'msg ' + cls; }
 function hide(el) { el.className = 'msg'; el.textContent = ''; }
+function esc(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;'); }
 
 async function api(path, opts) {
   const resp = await fetch(path, opts);
@@ -93,25 +106,111 @@ async function api(path, opts) {
   return data;
 }
 
+function renderImportProfiles(profiles) {
+  const sel = $('importProfile');
+  if (!profiles.length) {
+    sel.innerHTML = '<option>— nog geen administraties ingesteld —</option>';
+    sel.disabled = true;
+    return;
+  }
+  sel.innerHTML = profiles.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
+  sel.disabled = false;
+}
+
 async function loadConfig() {
   const cfg = await api('/api/config');
-  if (cfg.has_token) {
-    let status = 'Opgeslagen token aanwezig.';
-    if (cfg.company_name) status += ' Bedrijf: ' + cfg.company_name + '.';
-    if (cfg.account_name) status += ' Rekening: ' + cfg.account_name + '.';
-    $('settingsStatus').textContent = status;
-    if (cfg.company_id) {
-      $('company').innerHTML = '<option value="' + cfg.company_id + '">' + cfg.company_name + '</option>';
-      $('company').disabled = false;
-    }
-    if (cfg.account_id) {
-      $('account').innerHTML = '<option value="' + cfg.account_id + '">' + cfg.account_name + '</option>';
-      $('account').disabled = false;
-    }
-  } else {
-    $('settingsStatus').textContent = 'Nog geen token opgeslagen — vul hieronder je Rompslomp API-token in.';
+  renderImportProfiles(cfg.profiles);
+  $('settingsStatus').textContent = cfg.has_token
+    ? `Opgeslagen token aanwezig. ${cfg.profiles.length} administratie(s) ingesteld.`
+    : 'Nog geen token opgeslagen — vul hieronder je Rompslomp API-token in en klik Verbinden.';
+  return cfg;
+}
+
+// ---- administratie-editor ----
+
+async function fetchAccounts(companyId) {
+  if (!accountsCache[companyId]) {
+    const data = await api('/api/accounts', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({token: $('token').value, company_id: companyId})});
+    accountsCache[companyId] = data.accounts;
+  }
+  return accountsCache[companyId];
+}
+
+function companyOptions(selectedId) {
+  return companies.map(c => {
+    let label = c.name, disabled = '';
+    if (!c.api_accessible) { label += ' (geen API-toegang — gratis abonnement)'; disabled = 'disabled'; }
+    else if (c.missing_scopes.length) { label += ` (token mist rechten: ${c.missing_scopes.join(', ')})`; disabled = 'disabled'; }
+    return `<option value="${c.id}" ${disabled} ${c.id == selectedId ? 'selected' : ''}>${esc(label)}</option>`;
+  }).join('');
+}
+
+async function renderProfiles() {
+  const wrap = $('profiles');
+  wrap.innerHTML = '';
+  for (let i = 0; i < editorProfiles.length; i++) {
+    const p = editorProfiles[i];
+    const div = document.createElement('div');
+    div.className = 'profile';
+    div.innerHTML = `
+      <div class="profile-head">
+        <input type="text" data-i="${i}" data-f="name" value="${esc(p.name)}" placeholder="Naam (bijv. Emmpoint — ICS Creditcard)">
+        <button class="small" data-del="${i}">Verwijderen</button>
+      </div>
+      <label>Bedrijf <select data-i="${i}" data-f="company">${companyOptions(p.company_id)}</select></label>
+      <label>Rekening <select data-i="${i}" data-f="account"><option>laden…</option></select></label>`;
+    wrap.appendChild(div);
+    await fillAccounts(i);
   }
 }
+
+async function fillAccounts(i) {
+  const p = editorProfiles[i];
+  const companySel = document.querySelector(`select[data-i="${i}"][data-f="company"]`);
+  const accountSel = document.querySelector(`select[data-i="${i}"][data-f="account"]`);
+  const companyId = parseInt(companySel.value);
+  p.company_id = companyId;
+  p.company_name = companies.find(c => c.id === companyId)?.name || null;
+  try {
+    const accounts = await fetchAccounts(companyId);
+    accountSel.innerHTML = accounts.map(a =>
+      `<option value="${a.id}" ${a.id == p.account_id ? 'selected' : ''}>${esc(a.name)}</option>`).join('');
+    p.account_id = parseInt(accountSel.value);
+    p.account_name = accounts.find(a => a.id === p.account_id)?.name || null;
+  } catch (e) {
+    accountSel.innerHTML = '<option value="">— rekeningen laden mislukt —</option>';
+    show($('settingsMsg'), e.message, 'err');
+  }
+}
+
+$('profiles').addEventListener('change', async e => {
+  const i = parseInt(e.target.dataset.i), f = e.target.dataset.f;
+  if (isNaN(i)) return;
+  if (f === 'name') editorProfiles[i].name = e.target.value;
+  if (f === 'company') { editorProfiles[i].account_id = null; await fillAccounts(i); }
+  if (f === 'account') {
+    editorProfiles[i].account_id = parseInt(e.target.value);
+    editorProfiles[i].account_name = accountsCache[editorProfiles[i].company_id]
+      ?.find(a => a.id === editorProfiles[i].account_id)?.name || null;
+  }
+});
+
+$('profiles').addEventListener('click', e => {
+  if (e.target.dataset.del !== undefined) {
+    editorProfiles.splice(parseInt(e.target.dataset.del), 1);
+    renderProfiles();
+  }
+});
+
+$('btnAddProfile').onclick = () => {
+  const usable = companies.find(c => c.api_accessible && !c.missing_scopes.length);
+  if (!usable) return;
+  editorProfiles.push({name: '', company_id: usable.id, company_name: usable.name,
+                       account_id: null, account_name: null});
+  renderProfiles();
+};
 
 $('btnConnect').onclick = async () => {
   hide($('settingsMsg'));
@@ -119,76 +218,59 @@ $('btnConnect').onclick = async () => {
     const data = await api('/api/companies', {method:'POST',
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({token: $('token').value})});
-    const sel = $('company');
-    sel.innerHTML = data.companies.map(c => {
-      let label = c.name, disabled = '';
-      if (!c.api_accessible) { label += ' (geen API-toegang — gratis abonnement)'; disabled = 'disabled'; }
-      else if (c.missing_scopes.length) { label += ` (token mist rechten: ${c.missing_scopes.join(', ')})`; disabled = 'disabled'; }
-      return `<option value="${c.id}" ${disabled}>${label}</option>`;
-    }).join('');
-    const usable = data.companies.find(c => c.api_accessible && !c.missing_scopes.length);
-    if (!usable) {
-      sel.disabled = true;
+    companies = data.companies;
+    if (!companies.some(c => c.api_accessible && !c.missing_scopes.length)) {
       show($('settingsMsg'), 'Geen enkel bedrijf op dit token heeft API-toegang. ' +
         'API-toegang vereist een betaald Rompslomp-abonnement en een token met de rechten read:accounts en manage:payments.', 'err');
       return;
     }
-    sel.value = usable.id;
-    sel.disabled = false;
-    await loadAccounts();
+    const cfg = await api('/api/config');
+    editorProfiles = cfg.profiles.map(p => ({...p}));
+    if (!editorProfiles.length) $('btnAddProfile').click();
+    $('profileEditor').style.display = 'block';
+    await renderProfiles();
   } catch (e) { show($('settingsMsg'), e.message, 'err'); }
 };
-
-async function loadAccounts() {
-  const data = await api('/api/accounts', {method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({token: $('token').value, company_id: $('company').value})});
-  const sel = $('account');
-  sel.innerHTML = data.accounts.map(a => `<option value="${a.id}">${a.name}</option>`).join('');
-  sel.disabled = false;
-}
-$('company').onchange = () => loadAccounts().catch(e => show($('settingsMsg'), e.message, 'err'));
 
 $('btnSave').onclick = async () => {
   hide($('settingsMsg'));
   try {
     await api('/api/config', {method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({
-        token: $('token').value,
-        company_id: parseInt($('company').value) || null,
-        company_name: $('company').selectedOptions[0]?.text || null,
-        account_id: parseInt($('account').value) || null,
-        account_name: $('account').selectedOptions[0]?.text || null,
-      })});
+      body: JSON.stringify({token: $('token').value, profiles: editorProfiles})});
     $('token').value = '';
     show($('settingsMsg'), 'Instellingen opgeslagen.', 'ok');
-    loadConfig();
+    await loadConfig();
   } catch (e) { show($('settingsMsg'), e.message, 'err'); }
 };
+
+// ---- import ----
 
 $('btnPreview').onclick = async () => {
   hide($('previewMsg')); hide($('importMsg'));
   $('previewWrap').style.display = 'none';
   const file = $('file').files[0];
   if (!file) { show($('previewMsg'), 'Kies eerst een CSV-bestand.', 'err'); return; }
+  if ($('importProfile').disabled) { show($('previewMsg'), 'Stel eerst een administratie in.', 'err'); return; }
   $('btnPreview').disabled = true;
   try {
     const fd = new FormData();
     fd.append('file', file);
+    fd.append('profile_id', $('importProfile').value);
     const data = await api('/api/preview', {method:'POST', body: fd});
     previewRows = data.rows;
     const tbody = $('previewTable').querySelector('tbody');
     tbody.innerHTML = data.rows.map((r, i) => `
       <tr class="${r.duplicate ? 'dup' : ''}">
         <td><input type="checkbox" data-i="${i}" ${r.duplicate ? '' : 'checked'}></td>
-        <td>${r.date}</td><td>${r.description.replace(/</g,'&lt;')}</td>
+        <td>${r.date}</td><td>${esc(r.description)}</td>
         <td class="num">${Number(r.amount).toFixed(2).replace('.', ',')}</td>
         <td>${r.duplicate ? '<span class="badge dup">staat al in Rompslomp</span>'
                           : '<span class="badge new">nieuw</span>'}</td>
       </tr>`).join('');
     $('previewSummary').textContent =
-      `${data.rows.length} regels in CSV — ${data.new_count} nieuw, ` +
-      `${data.rows.length - data.new_count} al aanwezig (vergeleken met ${data.existing_count} bestaande af/bij-schrijvingen).`;
+      `${data.format}-export herkend: ${data.rows.length} regels — ${data.new_count} nieuw, ` +
+      `${data.rows.length - data.new_count} al aanwezig (vergeleken met ${data.existing_count} ` +
+      `bestaande af/bij-schrijvingen op deze rekening).`;
     $('previewWrap').style.display = 'block';
   } catch (e) { show($('previewMsg'), e.message, 'err'); }
   finally { $('btnPreview').disabled = false; }
@@ -208,7 +290,8 @@ $('btnImport').onclick = async () => {
   $('btnImport').textContent = 'Bezig met importeren…';
   try {
     const data = await api('/api/import', {method:'POST',
-      headers:{'Content-Type':'application/json'}, body: JSON.stringify({rows: selected})});
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({rows: selected, profile_id: $('importProfile').value})});
     let msg = `${data.imported} regel(s) geïmporteerd in Rompslomp.`;
     if (data.failed) {
       msg += ` ${data.failed} mislukt: ` +
