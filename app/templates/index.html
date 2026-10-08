@@ -74,13 +74,16 @@ in Rompslomp. Het CSV-formaat wordt automatisch herkend.</p>
   </label>
   <details style="margin-top:.6rem">
     <summary class="muted" style="cursor:pointer">…of transacties direct bij ICS ophalen (zonder bestand)</summary>
-    <p class="muted">Log in op icscards.nl → Mijn ICS → Overzicht → <b>Uitgebreid zoeken</b> → Zoeken.
-    Open DevTools (F12) → tabblad <b>Network</b>, rechtsklik op het <code>search?…</code>-request →
+    <p class="muted">Log in op icscards.nl en open het transactie-overzicht (kies eventueel de
+    gewenste periode). Open DevTools (F12) → tabblad <b>Network</b>, typ <code>transactionsv3</code>
+    in het filterveld, rechtsklik op het bovenste <code>transactionsv3?accountNumber=…</code>-request →
     Copy → <b>Copy as cURL</b>, en plak dat hieronder. Doe dit direct na het kopiëren: de
     ICS-sessie vervalt na ±1 minuut. Het geplakte request wordt éénmalig gebruikt en nergens
-    opgeslagen. Je kunt hier ook de ruwe JSON-response plakken.</p>
+    opgeslagen. Tip: in de URL staan <code>fromDate</code>/<code>untilDate</code> en
+    <code>pageSize=100</code> — pas die na het plakken gerust aan voor een langere periode.
+    Je kunt hier ook de ruwe JSON (tabblad Response) plakken.</p>
     <textarea id="pasted" rows="4" style="width:100%;box-sizing:border-box;font-family:monospace;font-size:.85rem"
-      placeholder="curl 'https://www.icscards.nl/…/search?…' -H 'Cookie: …' …"></textarea>
+      placeholder="curl 'https://www.icscards.nl/api/nl/sec/frontendservices/corporate/account/transactionsv3?accountNumber=…' -H 'cookie: …' …"></textarea>
   </details>
   <button id="btnPreview" class="primary">Controleren</button>
   <p class="muted">Regels die al in Rompslomp staan (zelfde bedrag, datum binnen ±3 dagen,

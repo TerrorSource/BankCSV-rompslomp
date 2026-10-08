@@ -240,23 +240,62 @@ def parse_mt940(text):
     return rows
 
 
+ICS_DATE_KEYS = ("transactionDate", "date", "bookingDate", "processingDate")
+ICS_AMOUNT_KEYS = ("billingAmount", "amount", "transactionAmount")
+
+
+def _find_transaction_list(node):
+    """Zoekt (recursief) de eerste lijst met transactie-objecten, zodat zowel
+    een kale lijst als een genest antwoord ({"transactions": [...]},
+    {"data": {"items": [...]}}) werkt."""
+    if isinstance(node, list):
+        if node and all(isinstance(x, dict) for x in node) and any(
+            any(k in x for k in ICS_DATE_KEYS) for x in node
+        ):
+            return node
+        for x in node:
+            found = _find_transaction_list(x)
+            if found is not None:
+                return found
+    elif isinstance(node, dict):
+        for v in node.values():
+            found = _find_transaction_list(v)
+            if found is not None:
+                return found
+    return None
+
+
+def _ics_amount(t):
+    for key in ICS_AMOUNT_KEYS:
+        if key in t and t[key] is not None:
+            value = t[key]
+            if isinstance(value, dict):  # bijv. {"value": 12.5, "currency": "EUR"}
+                value = value.get("value", value.get("amount"))
+            return key, value
+    return None, None
+
+
 def parse_ics_json(text):
-    """JSON-antwoord van het interne ICS transactie-API ('Uitgebreid zoeken').
+    """JSON-antwoord van het interne ICS transactie-API (transactionsv3).
     billingAmount: positief = afschrijving, zelfde teken als de ICS CSV-export."""
     try:
         data = json.loads(text)
     except json.JSONDecodeError as e:
         raise ValueError(f"Geen geldige JSON: {e}")
-    if isinstance(data, dict):
-        lists = [v for v in data.values() if isinstance(v, list)]
-        if not lists:
-            raise ValueError("JSON bevat geen lijst met transacties.")
-        data = lists[0]
+    if isinstance(data, list) and not data:
+        return []
+    transactions = _find_transaction_list(data)
+    if transactions is None:
+        keys = list(data.keys())[:15] if isinstance(data, dict) else type(data).__name__
+        raise ValueError(f"Geen transactielijst gevonden in de JSON. Gevonden velden: {keys}")
+
     rows = []
-    for i, t in enumerate(data, start=1):
-        if not isinstance(t, dict):
-            raise ValueError(f"Transactie {i} is geen object.")
-        raw_date = str(t.get("transactionDate") or t.get("date") or "")[:10]
+    for i, t in enumerate(transactions, start=1):
+        raw_date = ""
+        for key in ICS_DATE_KEYS:
+            if t.get(key):
+                raw_date = str(t[key])[:10]
+                break
         date = None
         for fmt in ("%Y-%m-%d", "%d-%m-%Y"):
             try:
@@ -265,14 +304,20 @@ def parse_ics_json(text):
             except ValueError:
                 pass
         if not date:
-            raise ValueError(f"Transactie {i}: onbekende datum '{raw_date}'.")
-        raw_amount = t.get("billingAmount")
+            raise ValueError(f"Transactie {i}: onbekende datum '{raw_date}'. "
+                             f"Velden: {sorted(t.keys())[:20]}")
+        key, raw_amount = _ics_amount(t)
         if raw_amount is None:
-            raise ValueError(f"Transactie {i}: 'billingAmount' ontbreekt.")
+            raise ValueError(f"Transactie {i}: geen bedrag gevonden. Velden: {sorted(t.keys())[:20]}")
         try:
-            amount = Decimal(str(raw_amount))
+            amount = Decimal(str(raw_amount).replace(",", "."))
         except InvalidOperation:
             raise ValueError(f"Transactie {i}: ongeldig bedrag '{raw_amount}'.")
+        # Sommige antwoorden geven een positief bedrag met een apart D/C-veld;
+        # een creditering (betaling/terugboeking) is in ICS-conventie negatief.
+        dc = str(t.get("debitCredit") or t.get("creditDebitIndicator") or "").upper()
+        if dc.startswith("C") and amount > 0:
+            amount = -amount
         if amount == 0:
             continue
         rows.append({

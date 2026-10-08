@@ -19,9 +19,11 @@ Ondersteunde formaten (automatisch herkend):
 
 Geïnspireerd op [ics-cards-downloadstatements](https://github.com/sietsevdschoot/ics-cards-downloadstatements):
 in plaats van een CSV te downloaden kun je het geauthenticeerde API-request
-uit je browser plakken. Log in op icscards.nl → Mijn ICS → Overzicht →
-**Uitgebreid zoeken** → Zoeken. Open DevTools → Network, rechtsklik op het
-`search?…`-request → Copy → **Copy as cURL**, en plak dat in de app. De app
+uit je browser plakken. Log in op icscards.nl en open het
+transactie-overzicht. Open DevTools → Network, filter op `transactionsv3`,
+rechtsklik op het `transactionsv3?accountNumber=…&fromDate=…&untilDate=…`-request
+→ Copy → **Copy as cURL**, en plak dat in de app. De periode en `pageSize`
+in de URL kun je na het plakken aanpassen. De app
 haalt de transacties dan zelf op en zet ze door dezelfde controle en import.
 
 Volledig automatisch inloggen bij ICS is bewust niet ingebouwd: de bank
