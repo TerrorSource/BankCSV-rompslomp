@@ -124,7 +124,9 @@ def decode_csv(file_bytes):
 
 
 def parse_ics_csv(reader):
-    """ICS creditcard-export: puntkomma's, dd-mm-jjjj, NL-bedragen met D/C-teken."""
+    """ICS creditcard-export: puntkomma's, dd-mm-jjjj, NL-bedragen met D/C-teken.
+    ICS geeft uitgaven positief; Rompslomp verwacht uitgaven negatief, dus
+    het teken wordt omgedraaid (incasso's worden daarmee positief)."""
     date_col = "Transactiedatum" if "Transactiedatum" in reader.fieldnames else "Boekingsdatum"
     if date_col not in reader.fieldnames or "Bedrag" not in reader.fieldnames:
         raise ValueError("Kolom 'Transactiedatum'/'Boekingsdatum' of 'Bedrag' ontbreekt in het ICS-bestand.")
@@ -147,7 +149,7 @@ def parse_ics_csv(reader):
             except ValueError:
                 pass
         try:
-            amount = parse_dutch_amount(raw_amount)
+            amount = -parse_dutch_amount(raw_amount)
         except (InvalidOperation, AttributeError):
             raise ValueError(f"Regel {line_no}: ongeldig bedrag '{raw_amount}'.")
         rows.append({
@@ -277,7 +279,8 @@ def _ics_amount(t):
 
 def parse_ics_json(text):
     """JSON-antwoord van het interne ICS transactie-API (transactionsv3).
-    billingAmount: positief = afschrijving, zelfde teken als de ICS CSV-export."""
+    billingAmount: positief = afschrijving, zelfde teken als de ICS CSV-export;
+    net als daar wordt het teken omgedraaid zodat uitgaven negatief worden."""
     try:
         data = json.loads(text)
     except json.JSONDecodeError as e:
@@ -318,6 +321,7 @@ def parse_ics_json(text):
         dc = str(t.get("debitCredit") or t.get("creditDebitIndicator") or "").upper()
         if dc.startswith("C") and amount > 0:
             amount = -amount
+        amount = -amount
         if amount == 0:
             continue
         rows.append({

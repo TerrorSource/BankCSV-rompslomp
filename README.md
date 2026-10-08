@@ -50,7 +50,8 @@ CSV uploaden, controleren, importeren.
   dezelfde dag correct worden geteld.
 - **Veldmapping**: de omschrijving (bij GoDutch inclusief tegenpartij) wordt de
   beschrijving in Rompslomp, de transactiedatum wordt de boekingsdatum,
-  bedragen worden ongewijzigd overgenomen.
+  uitgaven worden negatief en ontvangsten positief geboekt (ICS geeft
+  uitgaven positief, dus daar wordt het teken omgedraaid).
 - **Instellingen blijven bewaard**: API-token en administraties worden éénmalig
   ingesteld en opgeslagen in een Docker-volume.
 
