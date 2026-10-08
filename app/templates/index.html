@@ -69,9 +69,19 @@ in Rompslomp. Het CSV-formaat wordt automatisch herkend.</p>
   <label>Administratie
     <select id="importProfile"><option>— nog geen administraties ingesteld —</option></select>
   </label>
-  <label>CSV-bestand (ICS of GoDutch)
-    <input type="file" id="file" accept=".csv,text/csv">
+  <label>Bestand (ICS/GoDutch CSV, MT940 of ICS-JSON)
+    <input type="file" id="file" accept=".csv,.sta,.940,.mt940,.json,.txt,text/csv">
   </label>
+  <details style="margin-top:.6rem">
+    <summary class="muted" style="cursor:pointer">…of transacties direct bij ICS ophalen (zonder bestand)</summary>
+    <p class="muted">Log in op icscards.nl → Mijn ICS → Overzicht → <b>Uitgebreid zoeken</b> → Zoeken.
+    Open DevTools (F12) → tabblad <b>Network</b>, rechtsklik op het <code>search?…</code>-request →
+    Copy → <b>Copy as cURL</b>, en plak dat hieronder. Doe dit direct na het kopiëren: de
+    ICS-sessie vervalt na ±1 minuut. Het geplakte request wordt éénmalig gebruikt en nergens
+    opgeslagen. Je kunt hier ook de ruwe JSON-response plakken.</p>
+    <textarea id="pasted" rows="4" style="width:100%;box-sizing:border-box;font-family:monospace;font-size:.85rem"
+      placeholder="curl 'https://www.icscards.nl/…/search?…' -H 'Cookie: …' …"></textarea>
+  </details>
   <button id="btnPreview" class="primary">Controleren</button>
   <p class="muted">Regels die al in Rompslomp staan (zelfde bedrag, datum binnen ±3 dagen,
   per stuk geteld) worden automatisch overgeslagen.</p>
@@ -249,12 +259,14 @@ $('btnPreview').onclick = async () => {
   hide($('previewMsg')); hide($('importMsg'));
   $('previewWrap').style.display = 'none';
   const file = $('file').files[0];
-  if (!file) { show($('previewMsg'), 'Kies eerst een CSV-bestand.', 'err'); return; }
+  const pasted = $('pasted').value.trim();
+  if (!file && !pasted) { show($('previewMsg'), 'Kies een bestand of plak een cURL-commando/JSON.', 'err'); return; }
   if ($('importProfile').disabled) { show($('previewMsg'), 'Stel eerst een administratie in.', 'err'); return; }
   $('btnPreview').disabled = true;
   try {
     const fd = new FormData();
-    fd.append('file', file);
+    if (pasted) fd.append('pasted', pasted);
+    else fd.append('file', file);
     fd.append('profile_id', $('importProfile').value);
     const data = await api('/api/preview', {method:'POST', body: fd});
     previewRows = data.rows;
@@ -272,6 +284,7 @@ $('btnPreview').onclick = async () => {
       `${data.rows.length - data.new_count} al aanwezig (vergeleken met ${data.existing_count} ` +
       `bestaande af/bij-schrijvingen op deze rekening).`;
     $('previewWrap').style.display = 'block';
+    if (pasted) $('pasted').value = '';  // sessiegegevens niet laten rondslingeren
   } catch (e) { show($('previewMsg'), e.message, 'err'); }
   finally { $('btnPreview').disabled = false; }
 };

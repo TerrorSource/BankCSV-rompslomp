@@ -4,12 +4,32 @@ Kleine self-hosted webapp die bank- en creditcardexports (.csv) importeert als
 af/bij-schrijvingen in [Rompslomp](https://rompslomp.nl) via de
 [Rompslomp API](https://app.rompslomp.nl/developer/endpoints).
 
-Ondersteunde formaten (automatisch herkend aan de kopregel):
+Ondersteunde formaten (automatisch herkend):
 
 - **ICS creditcard** ([icscards.nl](https://www.icscards.nl)) — puntkomma's,
   `dd-mm-jjjj`, Nederlandse bedragen
 - **GoDutch** — komma's, ISO-datums, aparte Debit/Credit-kolommen
   (bedrag wordt Credit − Debit: af = negatief, bij = positief)
+- **MT940** — generieke parser voor `:61:`/`:86:`-records, inclusief
+  gestructureerde SEPA-omschrijvingen (`/NAME/`, `/REMI/`)
+- **ICS API-JSON** — het antwoord van het interne transactie-API van
+  icscards.nl (zie hieronder)
+
+### Transacties direct bij ICS ophalen
+
+Geïnspireerd op [ics-cards-downloadstatements](https://github.com/sietsevdschoot/ics-cards-downloadstatements):
+in plaats van een CSV te downloaden kun je het geauthenticeerde API-request
+uit je browser plakken. Log in op icscards.nl → Mijn ICS → Overzicht →
+**Uitgebreid zoeken** → Zoeken. Open DevTools → Network, rechtsklik op het
+`search?…`-request → Copy → **Copy as cURL**, en plak dat in de app. De app
+haalt de transacties dan zelf op en zet ze door dezelfde controle en import.
+
+Volledig automatisch inloggen bij ICS is bewust niet ingebouwd: de bank
+gebruikt MFA en anti-bot-maatregelen, en je bankwachtwoord hoort niet in een
+containertje thuis. Veiligheidsmaatregelen bij het plakken: alleen requests
+naar `icscards.nl` worden uitgevoerd, het geplakte request (met je
+sessie-cookie) wordt éénmalig gebruikt en nergens opgeslagen, en de
+ICS-sessie zelf vervalt na ±1 minuut inactiviteit.
 
 Handmatig overtikken of Excel-templates invullen is daarmee niet meer nodig:
 CSV uploaden, controleren, importeren.

@@ -2,8 +2,11 @@ import csv
 import io
 import json
 import os
+import re
+import shlex
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
+from urllib.parse import urlparse
 
 import requests
 from flask import Flask, jsonify, render_template, request
@@ -192,21 +195,178 @@ def parse_godutch_csv(reader):
     return rows
 
 
-def parse_bank_csv(file_bytes):
-    """Herkent het exportformaat aan de kopregel en parseert naar
-    uniforme regels: {date, booking_date, description, amount}."""
+def parse_mt940(text):
+    """Generieke MT940-parser: :61: (valutadatum, D/C, bedrag) met
+    bijbehorende :86:-omschrijving. Bankconventie: credit = positief,
+    debet = negatief; R(eversal) draait het teken om."""
+    rows = []
+    pending = None
+
+    def flush(description=""):
+        nonlocal pending
+        if pending:
+            pending["description"] = description
+            rows.append(pending)
+            pending = None
+
+    blocks = re.split(r"\r?\n(?=:\d{2}[A-Z]?:)|\r?\n(?=-$)", text.strip())
+    for block in blocks:
+        if block.startswith(":61:"):
+            flush()
+            m = re.match(r":61:(\d{6})(\d{4})?(R?[CD])[A-Z]?(\d{1,15},\d{0,2})", block)
+            if not m:
+                raise ValueError(f"Onleesbare MT940-regel: {block[:60]}")
+            raw_date, _, dc, raw_amount = m.groups()
+            date = datetime.strptime(raw_date, "%y%m%d").date()
+            amount = Decimal(raw_amount.replace(",", "."))
+            if dc in ("D", "RC"):
+                amount = -amount
+            pending = {"date": date.isoformat(), "booking_date": None,
+                       "description": "", "amount": None, "_amount": amount}
+        elif block.startswith(":86:") and pending:
+            desc = " ".join(block[4:].split())
+            # gestructureerde SEPA-tags (/NAME/, /REMI/) leesbaar maken;
+            # het USTD/STRD-subtype in REMI eerst weghalen
+            desc_clean = re.sub(r"/REMI//?(USTD|STRD)//?", "/REMI/", desc)
+            parts = []
+            for tag in ("NAME", "REMI", "EREF"):
+                m = re.search(rf"/{tag}/(.*?)(?=/[A-Z]{{3,4}}/|$)", desc_clean)
+                if m and m.group(1).strip():
+                    parts.append(m.group(1).strip())
+            flush(" — ".join(parts) if parts else desc)
+    flush()
+    for row in rows:
+        row["amount"] = str(row.pop("_amount"))
+    return rows
+
+
+def parse_ics_json(text):
+    """JSON-antwoord van het interne ICS transactie-API ('Uitgebreid zoeken').
+    billingAmount: positief = afschrijving, zelfde teken als de ICS CSV-export."""
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Geen geldige JSON: {e}")
+    if isinstance(data, dict):
+        lists = [v for v in data.values() if isinstance(v, list)]
+        if not lists:
+            raise ValueError("JSON bevat geen lijst met transacties.")
+        data = lists[0]
+    rows = []
+    for i, t in enumerate(data, start=1):
+        if not isinstance(t, dict):
+            raise ValueError(f"Transactie {i} is geen object.")
+        raw_date = str(t.get("transactionDate") or t.get("date") or "")[:10]
+        date = None
+        for fmt in ("%Y-%m-%d", "%d-%m-%Y"):
+            try:
+                date = datetime.strptime(raw_date, fmt).date()
+                break
+            except ValueError:
+                pass
+        if not date:
+            raise ValueError(f"Transactie {i}: onbekende datum '{raw_date}'.")
+        raw_amount = t.get("billingAmount")
+        if raw_amount is None:
+            raise ValueError(f"Transactie {i}: 'billingAmount' ontbreekt.")
+        try:
+            amount = Decimal(str(raw_amount))
+        except InvalidOperation:
+            raise ValueError(f"Transactie {i}: ongeldig bedrag '{raw_amount}'.")
+        if amount == 0:
+            continue
+        rows.append({
+            "date": date.isoformat(),
+            "booking_date": None,
+            "description": " ".join(str(t.get("description") or "").split()).upper(),
+            "amount": str(amount),
+        })
+    return rows
+
+
+def parse_statement(file_bytes):
+    """Herkent het formaat (ICS CSV, GoDutch CSV, MT940 of ICS JSON) en
+    parseert naar uniforme regels: {date, booking_date, description, amount}."""
     text = decode_csv(file_bytes)
-    header = text.splitlines()[0] if text.splitlines() else ""
+    stripped = text.lstrip()
+    lines = text.splitlines()
+    header = lines[0] if lines else ""
+    if stripped.startswith(("[", "{")):
+        return "ICS (API-JSON)", parse_ics_json(stripped)
     if "Transactiedatum" in header or "Boekingsdatum" in header:
         reader = csv.DictReader(io.StringIO(text), delimiter=";")
         return "ICS creditcard", parse_ics_csv(reader)
     if "Debit Amount" in header and "Credit Amount" in header:
         reader = csv.DictReader(io.StringIO(text))
         return "GoDutch", parse_godutch_csv(reader)
+    if ":61:" in text:
+        return "MT940", parse_mt940(text)
     raise ValueError(
-        "Onbekend CSV-formaat: dit lijkt geen ICS- of GoDutch-export. "
+        "Onbekend formaat: dit lijkt geen ICS-, GoDutch-, MT940- of JSON-export. "
         f"Gevonden kopregel: {header[:120]}"
     )
+
+
+# ---------- ICS transacties ophalen via geplakt DevTools-request ----------
+
+ICS_ALLOWED_HOSTS = ("icscards.nl",)
+
+
+def parse_curl_command(cmd):
+    """Parset een door Chrome gegenereerd 'Copy as cURL'-commando naar
+    (url, headers). Alleen requests naar icscards.nl zijn toegestaan en de
+    geplakte sessie wordt uitsluitend voor dit ene request gebruikt."""
+    cmd = cmd.replace("\\\n", " ").replace("^\n", " ").strip()
+    try:
+        tokens = shlex.split(cmd)
+    except ValueError as e:
+        raise ValueError(f"Kon het cURL-commando niet lezen: {e}")
+    if not tokens or tokens[0] != "curl":
+        raise ValueError("Dit is geen cURL-commando (moet met 'curl' beginnen).")
+
+    url, headers = None, {}
+    i = 1
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok in ("-H", "--header") and i + 1 < len(tokens):
+            key, _, value = tokens[i + 1].partition(":")
+            headers[key.strip()] = value.strip()
+            i += 2
+        elif tok in ("-b", "--cookie") and i + 1 < len(tokens):
+            headers["Cookie"] = tokens[i + 1]
+            i += 2
+        elif tok in ("-X", "--request", "-d", "--data", "--data-raw", "--data-binary", "-o", "--output"):
+            i += 2  # waarde overslaan; alleen eenvoudige GET wordt ondersteund
+        elif tok.startswith("http://") or tok.startswith("https://"):
+            url = tok
+            i += 1
+        else:
+            i += 1
+    if not url:
+        raise ValueError("Geen URL gevonden in het cURL-commando.")
+    host = (urlparse(url).hostname or "").lower()
+    if not any(host == h or host.endswith("." + h) for h in ICS_ALLOWED_HOSTS):
+        raise ValueError(f"Alleen requests naar icscards.nl zijn toegestaan (niet '{host}').")
+    # encoding aan requests overlaten (Chrome plakt o.a. zstd/br erin)
+    headers.pop("accept-encoding", None)
+    headers.pop("Accept-Encoding", None)
+    return url, headers
+
+
+def fetch_ics_transactions(curl_cmd):
+    url, headers = parse_curl_command(curl_cmd)
+    try:
+        resp = requests.get(url, headers=headers, timeout=30)
+    except requests.RequestException as e:
+        raise ValueError(f"Ophalen bij ICS mislukt: {e}")
+    if resp.status_code in (401, 403) or "login" in (resp.url or "").lower():
+        raise ValueError(
+            "ICS-sessie verlopen (de sessie vervalt al na ±1 minuut inactiviteit). "
+            "Log opnieuw in, kopieer het request nogmaals en plak het direct."
+        )
+    if not resp.ok:
+        raise ValueError(f"ICS gaf status {resp.status_code}.")
+    return parse_ics_json(resp.text)
 
 
 # ---------- duplicaatdetectie ----------
@@ -349,9 +509,11 @@ def accounts():
 
 @app.route("/api/preview", methods=["POST"])
 def preview():
-    """CSV parsen en tegen bestaande Rompslomp-betalingen houden."""
-    if "file" not in request.files:
-        return jsonify({"error": "Geen bestand geüpload."}), 400
+    """Transacties (bestand of geplakt request/JSON) parsen en tegen
+    bestaande Rompslomp-betalingen houden."""
+    pasted = (request.form.get("pasted") or "").strip()
+    if "file" not in request.files and not pasted:
+        return jsonify({"error": "Upload een bestand of plak een cURL-commando/JSON."}), 400
     cfg = load_config()
     if not cfg.get("token"):
         return jsonify({"error": "Geen API-token ingesteld: sla eerst de instellingen op."}), 400
@@ -360,7 +522,13 @@ def preview():
         return jsonify({"error": "Geen (geldige) administratie gekozen."}), 400
 
     try:
-        csv_format, rows = parse_bank_csv(request.files["file"].read())
+        if pasted:
+            if pasted.startswith("curl"):
+                csv_format, rows = "ICS (opgehaald via API)", fetch_ics_transactions(pasted)
+            else:
+                csv_format, rows = "ICS (API-JSON)", parse_ics_json(pasted)
+        else:
+            csv_format, rows = parse_statement(request.files["file"].read())
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
